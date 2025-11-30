@@ -12,6 +12,7 @@ html, body {
   min-height: 100vh;
   background-color: #f7f7f7;    /* light grey background */
   color: #111111;               /* dark text */
+  overflow: hidden;
 }
 
 #app {
@@ -19,8 +20,8 @@ html, body {
   margin: 0 auto;
   padding: 2rem 1rem;
   min-height: 100vh;
+  height: 100vh;
 }
-
 
 a {
   font-weight: 500;
