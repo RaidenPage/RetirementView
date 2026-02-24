@@ -53,6 +53,20 @@
         />
       </div>
 
+      <div class="input-group">
+        <label>Random Seed</label>
+        <input type="number" v-model.number="form.seed" min="1" />
+      </div>
+
+      <div class="input-group">
+        <label>Run Scenario</label>
+        <select v-model="selectedScenarioKey" @change="applyScenarioPreset(selectedScenarioKey)">
+          <option v-for="scenario in scenarioOptions" :key="scenario.key" :value="scenario.key">
+            {{ scenario.label }}
+          </option>
+        </select>
+      </div>
+
       <div class="input-group buttons">
         <button @click="startNewSimulation" class="primary">
           Start / Restart
@@ -87,6 +101,98 @@
         <span>Worst 5 year market drawdown so far: {{ worstDrawdownText }}</span>
       </div>
     </div>
+
+    <div class="outcome-summary" v-if="outcomeSummary">
+      <h3>End of Run Outcome Summary</h3>
+      <div class="summary-grid">
+        <span>Sustainability: <strong>{{ outcomeSummary.sustainabilityLabel }}</strong></span>
+        <span>Worst drawdown: <strong>{{ outcomeSummary.worstDrawdownPct }}</strong> (<strong>{{ outcomeSummary.worstDrawdownAmount }}</strong>)</span>
+        <span>Minimum real balance: <strong>{{ outcomeSummary.minRealBalance }}</strong></span>
+        <span>Retirement start withdrawal rate: <strong>{{ outcomeSummary.retirementStartWithdrawalRate }}</strong></span>
+        <span>Track-to-zero: <strong>{{ outcomeSummary.trackToZero }}</strong></span>
+        <span>Readiness score: <strong>{{ readinessScore.score }}</strong> - {{ readinessScore.interpretation }}</span>
+      </div>
+      <div class="lever-list" v-if="topLevers.length">
+        <strong>Top 3 levers</strong>
+        <ul>
+          <li v-for="lever in topLevers" :key="lever.name">
+            {{ lever.name }}: score {{ lever.scoreDelta >= 0 ? '+' : '' }}{{ lever.scoreDelta.toFixed(1) }}, depletion risk {{ lever.riskDeltaPct >= 0 ? '+' : '' }}{{ lever.riskDeltaPct.toFixed(1) }}%
+          </li>
+        </ul>
+      </div>
+      <button v-if="showMiniDistributionButton" @click="runMiniDistribution">Run 20 variations</button>
+    </div>
+
+    <div class="distribution-block" v-if="miniDistributionSummary && isEmailUnlocked">
+      <h3>Mini distribution (20 runs)</h3>
+      <p>% depleted before end: {{ miniDistributionSummary.depletionPct.toFixed(1) }}%</p>
+      <p>Median end balance: {{ formatCurrency(miniDistributionSummary.medianEndBalance) }}</p>
+      <p>10th percentile end balance: {{ formatCurrency(miniDistributionSummary.p10EndBalance) }}</p>
+      <p>90th percentile end balance: {{ formatCurrency(miniDistributionSummary.p90EndBalance) }}</p>
+      <p>Median worst drawdown: {{ miniDistributionSummary.medianWorstDrawdownPct.toFixed(1) }}%</p>
+    </div>
+
+    <div class="snapshot-preview" v-if="snapshotReport">
+      <h3>Retirement Snapshot</h3>
+      <p><strong>{{ snapshotReport.headline }}</strong></p>
+      <ul>
+        <li v-for="(insight, idx) in snapshotReport.insights.slice(0, 2)" :key="idx">{{ insight }}</li>
+      </ul>
+      <button v-if="!isEmailUnlocked" @click="openEmailGate">Email me the full Retirement Snapshot</button>
+      <div v-else>
+        <p><strong>Full insights</strong></p>
+        <ul>
+          <li v-for="(insight, idx) in snapshotReport.insights" :key="`all-${idx}`">{{ insight }}</li>
+        </ul>
+        <p><strong>Risks</strong></p>
+        <ul>
+          <li v-for="(risk, idx) in snapshotReport.risks" :key="`risk-${idx}`">{{ risk }}</li>
+        </ul>
+        <p><strong>Next steps</strong></p>
+        <ul>
+          <li v-for="(next, idx) in snapshotReport.nextSteps" :key="`next-${idx}`">{{ next }}</li>
+        </ul>
+        <div class="export-actions">
+          <button @click="copySnapshotToClipboard">Copy summary</button>
+          <button @click="downloadSnapshotJson">Download JSON</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="email-gate" v-if="showEmailGate && !isEmailUnlocked">
+      <h3>Email me the full Retirement Snapshot</h3>
+      <input type="email" v-model="leadForm.email" placeholder="Email address" />
+      <label>
+        <input type="checkbox" v-model="leadForm.consent" />
+        I consent to receiving follow-up information.
+      </label>
+      <button @click="submitLead">Submit</button>
+    </div>
+
+    <div class="post-email" v-if="isEmailUnlocked">
+      <h3>You're all set</h3>
+      <p>We captured your snapshot and unlocked advanced sections.</p>
+      <p><strong>What we'd cover in a sanity check:</strong></p>
+      <ul>
+        <li>Your spending sustainability range</li>
+        <li>How robust your plan is under tougher markets</li>
+        <li>Which levers have the highest impact</li>
+      </ul>
+      <button @click="onBookingClick">Book a 15 minute sanity check call</button>
+    </div>
+
+    <details class="assumptions-drawer">
+      <summary>Assumptions</summary>
+      <p>Inflation rate: {{ (inflationRate * 100).toFixed(1) }}%</p>
+      <p>Retirement duration assumption: 25 years</p>
+      <p>Fees assumption: returns are pre-fees unless otherwise stated.</p>
+      <ul>
+        <li v-for="risk in riskOptions" :key="`assump-${risk}`">
+          {{ risk }} mean {{ (RISK_SETTINGS[risk].mean * 100).toFixed(2) }}%, std {{ (RISK_SETTINGS[risk].std * 100).toFixed(2) }}%
+        </li>
+      </ul>
+      <p class="book-hint">Want this personalised to you? Book a call.</p>
+    </details>
 
     <p class="helper-text">
       Run a scenario, then save it and compare it with more conservative or more aggressive choices.
@@ -447,13 +553,28 @@ const PAST_RUN_COLORS = {
 const riskOptions = Object.keys(RISK_SETTINGS);
 const startYear = 2026;
 const inflationRate = 0.02;
+const SCENARIO_PRESETS = {
+  baseline: { label: "Baseline seed", seed: 202611, toughStart: false },
+  smooth: { label: "Smooth start seed", seed: 202677, toughStart: false },
+  tough: { label: "Tough start seed", seed: 202699, toughStart: true },
+};
+const bookingUrl = import.meta.env.VITE_BOOKING_URL || "https://example.com/book";
 
 // RNG
-function randn() {
+function createSeededRng(seed) {
+  let state = (Math.floor(seed) || 1) % 2147483647;
+  if (state <= 0) state += 2147483646;
+  return () => {
+    state = (state * 16807) % 2147483647;
+    return (state - 1) / 2147483646;
+  };
+}
+
+function randn(rng) {
   let u = 0;
   let v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
+  while (u === 0) u = rng();
+  while (v === 0) v = rng();
   return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
 }
 
@@ -476,7 +597,9 @@ class InvestmentPortfolioSimulator {
     initialRiskProfile,
     startYear,
     retirementYear,
-    monthlyWithdrawal
+    monthlyWithdrawal,
+    seed,
+    toughStartMode = false
   ) {
     this.year = startYear;
     this.startYear = startYear;
@@ -496,6 +619,11 @@ class InvestmentPortfolioSimulator {
     this.monthlySaving = monthlySaving;
     this.baseWithdrawal = monthlyWithdrawal;
     this.inflationRate = inflationRate;
+    this.seed = seed || 1;
+    this.rng = createSeededRng(this.seed);
+    this.toughStartMode = toughStartMode;
+    this.shockMonths = 24;
+    this.shockDrag = 0.02;
 
     this.riskProfile = null;
     this.meanReturn = null;
@@ -622,8 +750,18 @@ class InvestmentPortfolioSimulator {
       }
     }
 
-    const monthlyReturn =
-      this.meanReturn / 12.0 + (this.stdDev / Math.sqrt(12.0)) * randn();
+    let monthlyReturn =
+      this.meanReturn / 12.0 + (this.stdDev / Math.sqrt(12.0)) * randn(this.rng);
+
+    if (this.toughStartMode && this.monthIndex < this.shockMonths) {
+      monthlyReturn -= this.shockDrag;
+      this.history.push({
+        MonthIndex: this.monthIndex,
+        Year: parseFloat(this.year.toFixed(4)),
+        type: "shock",
+        label: "Tough start",
+      });
+    }
     this.unitValue *= 1.0 + monthlyReturn;
     const yearEndUnitValue = this.unitValue;
 
@@ -681,7 +819,14 @@ const form = reactive({
   retirementYear: 2026,
   initialRiskProfile: "Cash",
   desiredMonthlyWithdrawal: null,
+  seed: SCENARIO_PRESETS.baseline.seed,
 });
+
+const scenarioOptions = Object.entries(SCENARIO_PRESETS).map(([key, value]) => ({
+  key,
+  label: value.label,
+}));
+const selectedScenarioKey = ref("baseline");
 
 let simulator = null;
 
@@ -705,6 +850,17 @@ const worstDrawdownText = ref("Not yet calculated");
 // Speed controls
 const speedLabel = ref("Pause");
 let speedSettingMs = 1000;
+
+const outcomeSummary = ref(null);
+const miniDistributionSummary = ref(null);
+const showMiniDistributionButton = ref(false);
+const readinessScore = ref({ score: 0, interpretation: "Run a simulation" });
+const topLevers = ref([]);
+const snapshotReport = ref(null);
+const showEmailGate = ref(false);
+const isEmailUnlocked = ref(false);
+const leadForm = reactive({ email: "", consent: false });
+const toughStartComparison = ref(null);
 
 const friendlySpeedLabel = computed(() => {
   if (speedLabel.value === "Pause") return "Paused";
@@ -735,6 +891,136 @@ function formatXAxisTick(monthIndexRaw) {
 
   // yearly or fiveyear - just show year
   return String(yearValue);
+}
+
+function trackEvent(name, payload = {}) {
+  const existing = JSON.parse(localStorage.getItem("retirement_events") || "[]");
+  existing.push({ name, payload, at: new Date().toISOString() });
+  localStorage.setItem("retirement_events", JSON.stringify(existing));
+}
+
+function applyScenarioPreset(key) {
+  const preset = SCENARIO_PRESETS[key] || SCENARIO_PRESETS.baseline;
+  form.seed = preset.seed;
+}
+
+function percentile(sortedValues, pct) {
+  if (!sortedValues.length) return 0;
+  const idx = (sortedValues.length - 1) * pct;
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return sortedValues[lo];
+  const weight = idx - lo;
+  return sortedValues[lo] * (1 - weight) + sortedValues[hi] * weight;
+}
+
+function computeWorstDrawdownMetrics(history) {
+  const values = history
+    .filter((row) => typeof row["Year End Portfolio Balance"] === "number")
+    .map((row) => row["Year End Portfolio Balance"]);
+  if (!values.length) return { pct: 0, amount: 0 };
+  let peak = values[0];
+  let worstPct = 0;
+  let worstAmount = 0;
+  values.forEach((v) => {
+    if (v > peak) peak = v;
+    const amount = peak - v;
+    const pct = peak > 0 ? amount / peak : 0;
+    if (pct > worstPct) {
+      worstPct = pct;
+      worstAmount = amount;
+    }
+  });
+  return { pct: worstPct, amount: worstAmount };
+}
+
+function computeOutcomeSummary(sim) {
+  if (!sim || !sim.history.length) return null;
+  const rows = sim.history.filter((row) => row.Phase);
+  if (!rows.length) return null;
+  const endRow = rows[rows.length - 1];
+  const retirementStartMonth = Math.round((sim.retirementYear - sim.startYear) * 12);
+  const retirementRow = rows.find((r) => r.MonthIndex >= retirementStartMonth) || endRow;
+  const retirementBalance = retirementRow["Year End Portfolio Balance"] || 1;
+  const withdrawalAtRetirement = sim.baseWithdrawal * 12;
+  const withdrawalRateAtRetirement = withdrawalAtRetirement / Math.max(retirementBalance, 1);
+  const drawdown = computeWorstDrawdownMetrics(rows);
+  const minReal = Math.min(...rows.map((r) => r["Real End Portfolio Balance"] || 0));
+  const depletionRow = rows.find((r) => (r["Year End Portfolio Balance"] || 0) <= 0);
+  const sustainabilityLabel = depletionRow ? `Depletes (${Math.floor(depletionRow.Year)})` : "Surplus";
+  const remainingYears = Math.max(sim.deathYear - sim.year, 0.01);
+  const trackToZero = 1 / remainingYears;
+  return {
+    sustainabilityLabel,
+    depletionYear: depletionRow ? Math.floor(depletionRow.Year) : null,
+    worstDrawdownPct: `${(drawdown.pct * 100).toFixed(1)}%`,
+    worstDrawdownAmount: formatCurrency(drawdown.amount),
+    worstDrawdownPctRaw: drawdown.pct,
+    minRealBalance: formatCurrency(minReal),
+    minRealBalanceRaw: minReal,
+    retirementStartWithdrawalRate: `${(withdrawalRateAtRetirement * 100).toFixed(2)}%`,
+    retirementStartWithdrawalRateRaw: withdrawalRateAtRetirement,
+    trackToZero: `${(trackToZero * 100).toFixed(2)}%`,
+    trackToZeroRaw: trackToZero,
+    endBalanceRaw: endRow["Year End Portfolio Balance"] || 0,
+    depleted: Boolean(depletionRow),
+  };
+}
+
+function computeReadiness(summary) {
+  if (!summary) return { score: 0, interpretation: "Run a simulation" };
+  let score = 85;
+  const wr = summary.retirementStartWithdrawalRateRaw || 0;
+  score -= Math.max(0, (wr - 0.04) * 900);
+  if (summary.depleted) {
+    score -= 30;
+    if (summary.depletionYear) {
+      score -= Math.max(0, (simulator.deathYear - summary.depletionYear) * 0.8);
+    }
+  }
+  score -= (summary.worstDrawdownPctRaw || 0) * 70;
+  if (!summary.depleted && summary.endBalanceRaw > simulator.initialInvestment * 0.2) score += 8;
+  score = Math.max(0, Math.min(100, score));
+  let interpretation = "Needs stress testing";
+  if (score >= 80) interpretation = "Strong retirement readiness";
+  else if (score >= 60) interpretation = "Reasonable with monitoring";
+  return { score: Math.round(score), interpretation };
+}
+
+function buildSnapshotReport(summary) {
+  if (!summary || !simulator) return null;
+  const baselineVsTough = toughStartComparison.value
+    ? `Baseline vs tough start end balance: ${formatCurrency(toughStartComparison.value.baseline)} vs ${formatCurrency(toughStartComparison.value.tough)}.`
+    : "Run a tough start scenario for side-by-side comparison.";
+
+  const distLine = miniDistributionSummary.value
+    ? `Mini distribution: ${miniDistributionSummary.value.depletionPct.toFixed(1)}% depleted before end.`
+    : "Mini distribution not yet run.";
+
+  return {
+    headline: summary.depleted
+      ? "Plan likely depletes under current settings"
+      : "Plan currently tracks with a surplus path",
+    insights: [
+      `Sustainability outcome: ${summary.sustainabilityLabel}.`,
+      `Retirement start withdrawal rate is ${summary.retirementStartWithdrawalRate}.`,
+      `Worst nominal drawdown observed: ${summary.worstDrawdownPct} (${summary.worstDrawdownAmount}).`,
+      `Minimum inflation-adjusted balance reached ${summary.minRealBalance}.`,
+      baselineVsTough,
+    ],
+    risks: [
+      "Sequence-of-returns risk in early retirement years.",
+      "Spending rigidity during market drawdowns.",
+      "Longevity and inflation uncertainty beyond assumptions.",
+    ],
+    nextSteps: [
+      "Stress test with a lower spending target.",
+      "Review retirement date flexibility and bridge options.",
+      "Discuss personalised allocation and guardrails with an adviser.",
+    ],
+    baselineVsTough: baselineVsTough,
+    distributionSummary: distLine,
+  };
 }
 
 // ---- Chart helpers ----
@@ -869,7 +1155,7 @@ function initChart() {
 
 function updateChartFromSimulator() {
   if (!chart || !simulator) return;
-  const hist = simulator.history;
+  const hist = simulator.history.filter((row) => row && row.Phase);
   if (!hist.length) {
     chart.data.labels = [];
     chart.data.datasets[0].data = [];
@@ -1060,18 +1346,19 @@ function updateChartFromSimulator() {
 
 // 5 year market drawdown logic (nominal, withdrawals added back)
 function computeWorstDrawdown(history) {
-  if (!history || history.length === 0) {
+  const filtered = (history || []).filter((row) => row && row.Phase);
+  if (!filtered.length) {
     worstDrawdownText.value = "Not yet calculated";
     return;
   }
 
-  const n = history.length;
+  const n = filtered.length;
   const wealthAdj = [];
   let cumWithdrawals = 0;
 
   for (let i = 0; i < n; i++) {
-    const nominal = history[i]["Year End Portfolio Balance"];
-    const w = history[i].Withdrawals || 0;
+    const nominal = filtered[i]["Year End Portfolio Balance"];
+    const w = filtered[i].Withdrawals || 0;
 
     cumWithdrawals += w;
     wealthAdj.push(nominal + cumWithdrawals);
@@ -1255,7 +1542,9 @@ function updateInsights(lastRow, real, withdrawalRate) {
 
 function updateStatusFromSimulator() {
   if (!simulator || !simulator.history.length) return;
-  const lastRow = simulator.history[simulator.history.length - 1];
+  const rows = simulator.history.filter((row) => row && row.Phase);
+  if (!rows.length) return;
+  const lastRow = rows[rows.length - 1];
 
   currentRisk.value = simulator.riskProfile;
   phaseText.value = lastRow.Phase;
@@ -1275,7 +1564,7 @@ function updateStatusFromSimulator() {
   const noReturnRate = 1.0 / remainingYears;
   trackToZeroText.value = `${(noReturnRate * 100).toFixed(2)}%`;
 
-  computeWorstDrawdown(simulator.history);
+  computeWorstDrawdown(rows);
   updateInsights(lastRow, real, withdrawalRate);
 }
 
@@ -1291,6 +1580,7 @@ function startTimer() {
     if (finished) {
       stopTimer();
       speedLabel.value = "Pause";
+      onSimulationCompleted();
     }
   }, speedSettingMs);
 }
@@ -1311,6 +1601,15 @@ function startNewSimulation() {
   const monthlySaving = form.monthlySaving || 0;
   const retirementYear = form.retirementYear || startYear + 25;
   const initialRiskProfile = form.initialRiskProfile || "Balanced";
+  const seed = form.seed || SCENARIO_PRESETS.baseline.seed;
+  const toughStartMode = selectedScenarioKey.value === "tough";
+
+  trackEvent("simulation_started", {
+    seed,
+    scenario: selectedScenarioKey.value,
+    retirementYear,
+    risk: initialRiskProfile,
+  });
 
   let monthlyWithdrawal;
   if (form.desiredMonthlyWithdrawal && form.desiredMonthlyWithdrawal > 0) {
@@ -1326,7 +1625,9 @@ function startNewSimulation() {
     initialRiskProfile,
     startYear,
     retirementYear,
-    monthlyWithdrawal
+    monthlyWithdrawal,
+    seed,
+    toughStartMode
   );
 
   // Initial snapshot so the chart is never blank
@@ -1355,9 +1656,179 @@ function startNewSimulation() {
   insightHeadline.value = "";
   insightDetail.value = "";
   worstDrawdownText.value = "Not yet calculated";
+  outcomeSummary.value = null;
+  readinessScore.value = { score: 0, interpretation: "Run a simulation" };
+  topLevers.value = [];
+  snapshotReport.value = null;
+  showMiniDistributionButton.value = false;
+  if (!isEmailUnlocked.value) miniDistributionSummary.value = null;
 
   updateChartFromSimulator();
   updateStatusFromSimulator();
+}
+
+function runSimulationToCompletion(sim) {
+  let guard = 0;
+  while (!sim.finished && guard < 10000) {
+    sim.simulateMonth();
+    guard += 1;
+  }
+  return sim;
+}
+
+function evaluateLever(name, mutator) {
+  const initialInvestment = form.initialInvestment || 0;
+  const monthlySaving = form.monthlySaving || 0;
+  const retirementYear = form.retirementYear || startYear + 25;
+  const initialRiskProfile = form.initialRiskProfile || "Balanced";
+  const seed = form.seed || SCENARIO_PRESETS.baseline.seed;
+  const monthlyWithdrawal =
+    form.desiredMonthlyWithdrawal && form.desiredMonthlyWithdrawal > 0
+      ? form.desiredMonthlyWithdrawal
+      : (initialInvestment * 0.04) / 12;
+
+  const params = {
+    initialInvestment,
+    monthlySaving,
+    retirementYear,
+    initialRiskProfile,
+    monthlyWithdrawal,
+    seed,
+    toughStartMode: false,
+  };
+  mutator(params);
+  const leverSim = new InvestmentPortfolioSimulator(
+    params.initialInvestment,
+    params.monthlySaving,
+    params.initialRiskProfile,
+    startYear,
+    params.retirementYear,
+    params.monthlyWithdrawal,
+    params.seed,
+    params.toughStartMode
+  );
+  leverSim.history.push({
+    MonthIndex: 0,
+    Year: leverSim.year,
+    Phase: "Accumulation",
+    RiskProfile: leverSim.riskProfile,
+    "Year End Portfolio Balance": params.initialInvestment,
+    "Real End Portfolio Balance": params.initialInvestment,
+    Withdrawals: 0,
+  });
+  runSimulationToCompletion(leverSim);
+  const summary = computeOutcomeSummary(leverSim);
+  const score = computeReadiness(summary);
+  return { name, summary, score };
+}
+
+function computeTopLevers(baseSummary, baseScore) {
+  if (!baseSummary) return [];
+  const idx = riskOptions.indexOf(form.initialRiskProfile);
+  const riskNext = idx >= 0 && idx < riskOptions.length - 1 ? riskOptions[idx + 1] : form.initialRiskProfile;
+
+  const leverResults = [
+    evaluateLever("Reduce spending by $500/month", (p) => {
+      p.monthlyWithdrawal = Math.max(0, p.monthlyWithdrawal - 500);
+    }),
+    evaluateLever("Retire 1 year later", (p) => {
+      p.retirementYear = p.retirementYear + 1;
+    }),
+    evaluateLever("Increase risk profile 1 step", (p) => {
+      p.initialRiskProfile = riskNext;
+    }),
+  ];
+
+  return leverResults.map((res) => ({
+    name: res.name,
+    scoreDelta: res.score.score - baseScore.score,
+    riskDeltaPct: (Number(res.summary.depleted) - Number(baseSummary.depleted)) * 100,
+  }));
+}
+
+function onSimulationCompleted() {
+  outcomeSummary.value = computeOutcomeSummary(simulator);
+  readinessScore.value = computeReadiness(outcomeSummary.value);
+  topLevers.value = computeTopLevers(outcomeSummary.value, readinessScore.value);
+  snapshotReport.value = buildSnapshotReport(outcomeSummary.value);
+  showMiniDistributionButton.value = selectedScenarioKey.value === "baseline";
+  trackEvent("simulation_completed", {
+    scenario: selectedScenarioKey.value,
+    depleted: outcomeSummary.value?.depleted,
+    score: readinessScore.value.score,
+  });
+
+  if (selectedScenarioKey.value === "baseline") {
+    const toughSim = new InvestmentPortfolioSimulator(
+      form.initialInvestment || 0,
+      form.monthlySaving || 0,
+      form.initialRiskProfile || "Balanced",
+      startYear,
+      form.retirementYear || startYear + 25,
+      simulator.baseWithdrawal,
+      (form.seed || SCENARIO_PRESETS.baseline.seed) + 999,
+      true
+    );
+    toughSim.history.push({
+      MonthIndex: 0,
+      Year: toughSim.year,
+      Phase: "Accumulation",
+      RiskProfile: toughSim.riskProfile,
+      "Year End Portfolio Balance": form.initialInvestment || 0,
+      "Real End Portfolio Balance": form.initialInvestment || 0,
+      Withdrawals: 0,
+    });
+    runSimulationToCompletion(toughSim);
+    const toughSummary = computeOutcomeSummary(toughSim);
+    toughStartComparison.value = {
+      baseline: outcomeSummary.value?.endBalanceRaw || 0,
+      tough: toughSummary?.endBalanceRaw || 0,
+    };
+    snapshotReport.value = buildSnapshotReport(outcomeSummary.value);
+  }
+}
+
+function runMiniDistribution() {
+  if (!simulator) return;
+  const outcomes = [];
+  for (let i = 0; i < 20; i++) {
+    const sim = new InvestmentPortfolioSimulator(
+      form.initialInvestment || 0,
+      form.monthlySaving || 0,
+      form.initialRiskProfile || "Balanced",
+      startYear,
+      form.retirementYear || startYear + 25,
+      simulator.baseWithdrawal,
+      (form.seed || SCENARIO_PRESETS.baseline.seed) + i + 1,
+      false
+    );
+    sim.history.push({
+      MonthIndex: 0,
+      Year: sim.year,
+      Phase: "Accumulation",
+      RiskProfile: sim.riskProfile,
+      "Year End Portfolio Balance": form.initialInvestment || 0,
+      "Real End Portfolio Balance": form.initialInvestment || 0,
+      Withdrawals: 0,
+    });
+    runSimulationToCompletion(sim);
+    outcomes.push(computeOutcomeSummary(sim));
+  }
+
+  const depletedCount = outcomes.filter((o) => o?.depleted).length;
+  const endBalances = outcomes.map((o) => o?.endBalanceRaw || 0).sort((a, b) => a - b);
+  const drawdowns = outcomes.map((o) => (o?.worstDrawdownPctRaw || 0) * 100).sort((a, b) => a - b);
+
+  miniDistributionSummary.value = {
+    depletionPct: (depletedCount / outcomes.length) * 100,
+    medianEndBalance: percentile(endBalances, 0.5),
+    p10EndBalance: percentile(endBalances, 0.1),
+    p90EndBalance: percentile(endBalances, 0.9),
+    medianWorstDrawdownPct: percentile(drawdowns, 0.5),
+  };
+
+  snapshotReport.value = buildSnapshotReport(outcomeSummary.value);
+  trackEvent("mini_distribution_run", miniDistributionSummary.value);
 }
 
 function resetSimulation() {
@@ -1446,6 +1917,74 @@ function adjustWithdrawal(direction) {
 function setActiveSavedRun(index) {
   activeSavedRunIndex.value = index === activeSavedRunIndex.value ? null : index;
   updateChartFromSimulator();
+}
+
+function openEmailGate() {
+  showEmailGate.value = true;
+  trackEvent("email_modal_opened", { scenario: selectedScenarioKey.value });
+}
+
+function submitLead() {
+  if (!leadForm.email || !leadForm.consent) return;
+  const payload = {
+    email: leadForm.email,
+    consent: leadForm.consent,
+    marketing_opt_in: leadForm.consent,
+    timestamp: new Date().toISOString(),
+    version: "consent-text-v1",
+    source: "retirement-view",
+    inputs: { ...form, scenario: selectedScenarioKey.value },
+    outputs: {
+      outcomeSummary: outcomeSummary.value,
+      readinessScore: readinessScore.value,
+      miniDistributionSummary: miniDistributionSummary.value,
+    },
+  };
+
+  const existing = JSON.parse(localStorage.getItem("retirement_leads") || "[]");
+  existing.push(payload);
+  localStorage.setItem("retirement_leads", JSON.stringify(existing));
+
+  isEmailUnlocked.value = true;
+  showEmailGate.value = false;
+  trackEvent("email_submitted", { email: leadForm.email });
+}
+
+function onBookingClick() {
+  trackEvent("booking_clicked", { url: bookingUrl });
+  window.open(bookingUrl, "_blank");
+}
+
+function copySnapshotToClipboard() {
+  if (!snapshotReport.value) return;
+  const lines = [
+    snapshotReport.value.headline,
+    ...snapshotReport.value.insights,
+    ...snapshotReport.value.risks,
+    ...snapshotReport.value.nextSteps,
+    snapshotReport.value.distributionSummary,
+  ];
+  navigator.clipboard.writeText(lines.join("\n"));
+}
+
+function downloadSnapshotJson() {
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    inputs: { ...form, scenario: selectedScenarioKey.value },
+    outcomeSummary: outcomeSummary.value,
+    readinessScore: readinessScore.value,
+    topLevers: topLevers.value,
+    snapshotReport: snapshotReport.value,
+    miniDistributionSummary: miniDistributionSummary.value,
+    toughStartComparison: toughStartComparison.value,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "retirement-snapshot.json";
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ---- Lifecycle ----
@@ -1630,6 +2169,41 @@ button.active:hover {
   gap: 0.75rem;
   font-size: 0.8rem;
   color: #4b5563;
+}
+
+.outcome-summary,
+.distribution-block,
+.snapshot-preview,
+.email-gate,
+.post-email,
+.assumptions-drawer {
+  margin-top: 0.6rem;
+  margin-bottom: 0.6rem;
+  padding: 0.65rem 0.8rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.summary-grid {
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+
+.lever-list ul,
+.snapshot-preview ul,
+.post-email ul {
+  margin: 0.25rem 0 0.4rem 1.1rem;
+}
+
+.assumptions-drawer summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.book-hint {
+  text-decoration: underline;
 }
 
 /* Saved runs chips */
